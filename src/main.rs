@@ -1,6 +1,12 @@
 use std::collections::HashMap;
+use std::env;
 
+use mongodb::Client;
+use mongodb::options::{ClientOptions, ResolverConfig};
 use reqwest::Error;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry;
+use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +38,7 @@ struct Count {
     status_progress: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoteResult {
     nama: String,
     id: i32,
@@ -44,16 +50,43 @@ struct VoteResult {
 }
 
 async fn populate_vote() -> Result<(), Error> {
-    let region1 = populate_region_1().await;
-    let vote1 = vote_count_region_1().await;
+    let client_uri =
+        env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment var!");
+
+    let options =
+        ClientOptions::parse_with_resolver_config(client_uri, ResolverConfig::cloudflare())
+            .await.unwrap();
+    let client = Client::with_options(options).unwrap();
+
+    let reqwest_client = reqwest::Client::builder().build().unwrap();
+    let request_client = ClientBuilder::new(reqwest_client)
+        .with(RetryTransientMiddleware::new_with_policy(
+            ExponentialBackoff::builder()
+                .retry_bounds(
+                    std::time::Duration::from_millis(30),
+                    std::time::Duration::from_millis(100),
+                )
+                .build_with_max_retries(3),
+        ))
+        .build();
+
+    let region1 = populate_region_1(request_client.clone()).await;
+    let vote1 = vote_count_region_1(request_client.clone()).await;
     let vote_results1 = join_vote(region1.clone(), vote1);
+    println!("Inserting Indonesia with {} records", vote_results1.len());
+    client
+        .database("pemilu")
+        .collection("vote")
+        .insert_many(vote_results1.clone(), None)
+        .await;
 
     let region2_tasks: Vec<_> = vote_results1
         .into_iter()
         .map(|vote_results| {
-            tokio::spawn(async {
-                let region = populate_region_2(vote_results.clone()).await;
-                let vote = vote_count_region_2(vote_results).await;
+            let request_client = request_client.clone();
+            tokio::spawn(async move {
+                let region = populate_region_2(request_client.clone(), vote_results.clone()).await;
+                let vote = vote_count_region_2(request_client.clone(), vote_results).await;
                 join_vote(region, vote)
             })
         })
@@ -63,13 +96,20 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
+    println!("Inserting Tingkat 2 with {} records", vote_results2.len());
+    client
+        .database("pemilu")
+        .collection("vote")
+        .insert_many(vote_results2.clone(), None)
+        .await;
 
     let region3_tasks: Vec<_> = vote_results2
         .into_iter()
         .map(|vote_results| {
-            tokio::spawn(async {
-                let region = populate_region_3(vote_results.clone()).await;
-                let vote = vote_count_region_3(vote_results).await;
+            let request_client = request_client.clone();
+            tokio::spawn(async move {
+                let region = populate_region_3(request_client.clone(), vote_results.clone()).await;
+                let vote = vote_count_region_3(request_client.clone(), vote_results).await;
                 join_vote(region, vote)
             })
         })
@@ -79,13 +119,20 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
+    println!("Inserting Tingkat 3 with {} records", vote_results3.len());
+    client
+        .database("pemilu")
+        .collection("vote")
+        .insert_many(vote_results3.clone(), None)
+        .await;
 
     let region4_tasks: Vec<_> = vote_results3
         .into_iter()
         .map(|vote_results| {
-            tokio::spawn(async {
-                let region = populate_region_4(vote_results.clone()).await;
-                let vote = vote_count_region_4(vote_results).await;
+            let request_client = request_client.clone();
+            tokio::spawn(async move {
+                let region = populate_region_4(request_client.clone(), vote_results.clone()).await;
+                let vote = vote_count_region_4(request_client.clone(), vote_results).await;
                 join_vote(region, vote)
             })
         })
@@ -95,13 +142,20 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
+    println!("Inserting Tingkat 4 with {} records", vote_results4.len());
+    client
+        .database("pemilu")
+        .collection("vote")
+        .insert_many(vote_results4.clone(), None)
+        .await;
 
     let region5_tasks: Vec<_> = vote_results4
         .into_iter()
         .map(|vote_results| {
-            tokio::spawn(async {
-                let region = populate_region_5(vote_results.clone()).await;
-                let vote = vote_count_region_5(vote_results).await;
+            let request_client = request_client.clone();
+            tokio::spawn(async move {
+                let region = populate_region_5(request_client.clone(), vote_results.clone()).await;
+                let vote = vote_count_region_5(request_client.clone(), vote_results).await;
                 join_vote(region, vote)
             })
         })
@@ -111,13 +165,18 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
+    println!("Inserting Tingkat 5 with {} records", vote_results5.len());
+    client
+        .database("pemilu")
+        .collection("vote")
+        .insert_many(vote_results5, None)
+        .await;
     Ok(())
 }
 
-async fn populate_region_1() -> Vec<Region> {
+async fn populate_region_1(request_client: ClientWithMiddleware) -> Vec<Region> {
     let url = "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/0.json";
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url)
         .header("Content-Type", "application/json")
         .send()
@@ -128,13 +187,15 @@ async fn populate_region_1() -> Vec<Region> {
     regions
 }
 
-async fn populate_region_2(vote_result1: VoteResult) -> Vec<Region> {
+async fn populate_region_2(
+    request_client: ClientWithMiddleware,
+    vote_result1: VoteResult,
+) -> Vec<Region> {
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}.json",
         vote_result1.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -145,14 +206,16 @@ async fn populate_region_2(vote_result1: VoteResult) -> Vec<Region> {
     regions2
 }
 
-async fn populate_region_3(vote_result2: VoteResult) -> Vec<Region> {
+async fn populate_region_3(
+    request_client: ClientWithMiddleware,
+    vote_result2: VoteResult,
+) -> Vec<Region> {
     let region2_code = &vote_result2.kode[0..2];
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}.json",
         region2_code, vote_result2.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -163,15 +226,17 @@ async fn populate_region_3(vote_result2: VoteResult) -> Vec<Region> {
     regions2
 }
 
-async fn populate_region_4(vote_result3: VoteResult) -> Vec<Region> {
+async fn populate_region_4(
+    request_client: ClientWithMiddleware,
+    vote_result3: VoteResult,
+) -> Vec<Region> {
     let region2_code = &vote_result3.kode[0..2];
     let region3_code = &vote_result3.kode[0..4];
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}.json",
         region2_code, region3_code, vote_result3.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -182,7 +247,10 @@ async fn populate_region_4(vote_result3: VoteResult) -> Vec<Region> {
     regions3
 }
 
-async fn populate_region_5(vote_result4: VoteResult) -> Vec<Region> {
+async fn populate_region_5(
+    request_client: ClientWithMiddleware,
+    vote_result4: VoteResult,
+) -> Vec<Region> {
     let region2_code = &vote_result4.kode[0..2];
     let region3_code = &vote_result4.kode[0..4];
     let region4_code = &vote_result4.kode[0..6];
@@ -190,8 +258,7 @@ async fn populate_region_5(vote_result4: VoteResult) -> Vec<Region> {
         "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}/{}..json",
         region2_code, region3_code, region4_code, vote_result4.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -202,10 +269,9 @@ async fn populate_region_5(vote_result4: VoteResult) -> Vec<Region> {
     regions5
 }
 
-async fn vote_count_region_1() -> Vote {
+async fn vote_count_region_1(request_client: ClientWithMiddleware) -> Vote {
     let url = "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp.json";
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -216,13 +282,15 @@ async fn vote_count_region_1() -> Vote {
     vote
 }
 
-async fn vote_count_region_2(vote_result1: VoteResult) -> Vote {
+async fn vote_count_region_2(
+    request_client: ClientWithMiddleware,
+    vote_result1: VoteResult,
+) -> Vote {
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}.json",
         vote_result1.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -233,14 +301,16 @@ async fn vote_count_region_2(vote_result1: VoteResult) -> Vote {
     vote
 }
 
-async fn vote_count_region_3(vote_result2: VoteResult) -> Vote {
+async fn vote_count_region_3(
+    request_client: ClientWithMiddleware,
+    vote_result2: VoteResult,
+) -> Vote {
     let region2_code = &vote_result2.kode[0..2];
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}.json",
         region2_code, vote_result2.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -251,15 +321,17 @@ async fn vote_count_region_3(vote_result2: VoteResult) -> Vote {
     vote
 }
 
-async fn vote_count_region_4(vote_result2: VoteResult) -> Vote {
+async fn vote_count_region_4(
+    request_client: ClientWithMiddleware,
+    vote_result2: VoteResult,
+) -> Vote {
     let region2_code = &vote_result2.kode[0..2];
     let region3_code = &vote_result2.kode[0..4];
     let url = format!(
         "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}.json",
         region2_code, region3_code, vote_result2.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
@@ -270,7 +342,10 @@ async fn vote_count_region_4(vote_result2: VoteResult) -> Vote {
     vote
 }
 
-async fn vote_count_region_5(vote_result4: VoteResult) -> Vote {
+async fn vote_count_region_5(
+    request_client: ClientWithMiddleware,
+    vote_result4: VoteResult,
+) -> Vote {
     let region2_code = &vote_result4.kode[0..2];
     let region3_code = &vote_result4.kode[0..4];
     let region4_code = &vote_result4.kode[0..6];
@@ -278,8 +353,7 @@ async fn vote_count_region_5(vote_result4: VoteResult) -> Vote {
         "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}/{}.json",
         region2_code, region3_code, region4_code, vote_result4.kode
     );
-    let client = reqwest::Client::new();
-    let response = client
+    let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
