@@ -9,6 +9,9 @@ use reqwest_retry;
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use serde::{Deserialize, Serialize};
 
+const MAX_PROCESS_SIZE: usize = 100;
+const MAX_BATCH_SIZE: usize = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Region {
@@ -55,7 +58,8 @@ async fn populate_vote() -> Result<(), Error> {
 
     let options =
         ClientOptions::parse_with_resolver_config(client_uri, ResolverConfig::cloudflare())
-            .await.unwrap();
+            .await
+            .unwrap();
     let client = Client::with_options(options).unwrap();
 
     let reqwest_client = reqwest::Client::builder().build().unwrap();
@@ -63,23 +67,63 @@ async fn populate_vote() -> Result<(), Error> {
         .with(RetryTransientMiddleware::new_with_policy(
             ExponentialBackoff::builder()
                 .retry_bounds(
-                    std::time::Duration::from_millis(30),
-                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_millis(3000),
+                    std::time::Duration::from_millis(10000),
                 )
                 .build_with_max_retries(3),
         ))
         .build();
 
+    let vote_results1 = process_region_1(client.clone(), request_client.clone()).await;
+
+    let vote_results2 =
+        process_region_2(vote_results1, client.clone(), request_client.clone()).await;
+
+    let mut vote_results3: Vec<VoteResult> = Vec::new();
+    for element in vote_results2
+        .chunks(MAX_PROCESS_SIZE)
+        .map(|(batch)| batch.to_vec())
+        .collect::<Vec<Vec<VoteResult>>>()
+    {
+        let mut result = process_region_3(element, client.clone(), request_client.clone()).await;
+        vote_results3.append(&mut result);
+    }
+
+    let mut vote_results4: Vec<VoteResult> = Vec::new();
+    for element in vote_results3
+        .chunks(MAX_PROCESS_SIZE)
+        .map(|(batch)| batch.to_vec())
+        .collect::<Vec<Vec<VoteResult>>>()
+    {
+        let mut result = process_region_4(element, client.clone(), request_client.clone()).await;
+        vote_results4.append(&mut result);
+    }
+
+    for element in vote_results4
+        .chunks(MAX_PROCESS_SIZE)
+        .map(|(batch)| batch.to_vec())
+        .collect::<Vec<Vec<VoteResult>>>()
+    {
+        process_region_5(element, client.clone(), request_client.clone()).await;
+    }
+
+    Ok(())
+}
+
+async fn process_region_1(client: Client, request_client: ClientWithMiddleware) -> Vec<VoteResult> {
     let region1 = populate_region_1(request_client.clone()).await;
     let vote1 = vote_count_region_1(request_client.clone()).await;
     let vote_results1 = join_vote(region1.clone(), vote1);
-    println!("Inserting Indonesia with {} records", vote_results1.len());
-    client
-        .database("pemilu")
-        .collection("vote")
-        .insert_many(vote_results1.clone(), None)
-        .await;
+    insert_vote("Tingkat 1", vote_results1.clone(), client).await;
 
+    vote_results1
+}
+
+async fn process_region_2(
+    vote_results1: Vec<VoteResult>,
+    client: Client,
+    request_client: ClientWithMiddleware,
+) -> Vec<VoteResult> {
     let region2_tasks: Vec<_> = vote_results1
         .into_iter()
         .map(|vote_results| {
@@ -96,13 +140,16 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
-    println!("Inserting Tingkat 2 with {} records", vote_results2.len());
-    client
-        .database("pemilu")
-        .collection("vote")
-        .insert_many(vote_results2.clone(), None)
-        .await;
+    insert_vote("Tingkat 2", vote_results2.clone(), client).await;
 
+    vote_results2
+}
+
+async fn process_region_3(
+    vote_results2: Vec<VoteResult>,
+    client: Client,
+    request_client: ClientWithMiddleware,
+) -> Vec<VoteResult> {
     let region3_tasks: Vec<_> = vote_results2
         .into_iter()
         .map(|vote_results| {
@@ -119,13 +166,15 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
-    println!("Inserting Tingkat 3 with {} records", vote_results3.len());
-    client
-        .database("pemilu")
-        .collection("vote")
-        .insert_many(vote_results3.clone(), None)
-        .await;
+    insert_vote("Tingkat 3", vote_results3.clone(), client).await;
+    vote_results3
+}
 
+async fn process_region_4(
+    vote_results3: Vec<VoteResult>,
+    client: Client,
+    request_client: ClientWithMiddleware,
+) -> Vec<VoteResult> {
     let region4_tasks: Vec<_> = vote_results3
         .into_iter()
         .map(|vote_results| {
@@ -143,12 +192,15 @@ async fn populate_vote() -> Result<(), Error> {
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
     println!("Inserting Tingkat 4 with {} records", vote_results4.len());
-    client
-        .database("pemilu")
-        .collection("vote")
-        .insert_many(vote_results4.clone(), None)
-        .await;
+    insert_vote("Tingkat 4", vote_results4.clone(), client).await;
+    vote_results4
+}
 
+async fn process_region_5(
+    vote_results4: Vec<VoteResult>,
+    client: Client,
+    request_client: ClientWithMiddleware,
+) -> Vec<VoteResult> {
     let region5_tasks: Vec<_> = vote_results4
         .into_iter()
         .map(|vote_results| {
@@ -165,13 +217,8 @@ async fn populate_vote() -> Result<(), Error> {
         .into_iter()
         .flat_map(|regions| regions.unwrap())
         .collect::<Vec<VoteResult>>();
-    println!("Inserting Tingkat 5 with {} records", vote_results5.len());
-    client
-        .database("pemilu")
-        .collection("vote")
-        .insert_many(vote_results5, None)
-        .await;
-    Ok(())
+    insert_vote("Tingkat 5", vote_results5.clone(), client).await;
+    vote_results5
 }
 
 async fn populate_region_1(request_client: ClientWithMiddleware) -> Vec<Region> {
@@ -255,7 +302,7 @@ async fn populate_region_5(
     let region3_code = &vote_result4.kode[0..4];
     let region4_code = &vote_result4.kode[0..6];
     let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}/{}..json",
+        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}/{}.json",
         region2_code, region3_code, region4_code, vote_result4.kode
     );
     let response = request_client
@@ -391,6 +438,35 @@ fn join_vote(region: Vec<Region>, vote: Vote) -> Vec<VoteResult> {
             }
         })
         .collect::<Vec<VoteResult>>()
+}
+
+async fn insert_vote(title: &str, vote_results: Vec<VoteResult>, client: Client) {
+    let length = (vote_results.len() / MAX_BATCH_SIZE) + 1;
+    let insert_task_1: Vec<_> = vote_results
+        .clone()
+        .chunks(MAX_BATCH_SIZE)
+        .enumerate()
+        .map(|(index, batch)| {
+            let client = client.clone();
+            let batch = batch.to_vec();
+            let title = title.to_string();
+            tokio::spawn(async move {
+                println!(
+                    "Inserting {} with {} records part {}/{}",
+                    title,
+                    batch.len(),
+                    index + 1,
+                    length
+                );
+                client
+                    .database("pemilu")
+                    .collection("vote")
+                    .insert_many(batch, None)
+                    .await
+            })
+        })
+        .collect();
+    futures::future::join_all(insert_task_1).await;
 }
 
 #[tokio::main]
