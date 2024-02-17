@@ -43,10 +43,19 @@ struct Count {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoteResult {
-    nama: String,
-    id: i32,
+    #[serde(rename = "_id")]
     kode: String,
     tingkat: i8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_tingkat_1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_tingkat_2: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_tingkat_3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_tingkat_4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_tingkat_5: Option<String>,
     i01: i32,
     i02: i32,
     i03: i32,
@@ -113,7 +122,7 @@ async fn populate_vote() -> Result<(), Error> {
 async fn process_region_1(client: Client, request_client: ClientWithMiddleware) -> Vec<VoteResult> {
     let region1 = populate_region_1(request_client.clone()).await;
     let vote1 = vote_count_region_1(request_client.clone()).await;
-    let vote_results1 = join_vote(region1.clone(), vote1);
+    let vote_results1 = join_vote(region1.clone(), vote1, None, 1);
     insert_vote("Tingkat 1", vote_results1.clone(), client).await;
 
     vote_results1
@@ -130,8 +139,8 @@ async fn process_region_2(
             let request_client = request_client.clone();
             tokio::spawn(async move {
                 let region = populate_region_2(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_2(request_client.clone(), vote_results).await;
-                join_vote(region, vote)
+                let vote = vote_count_region_2(request_client.clone(), vote_results.clone()).await;
+                join_vote(region, vote, Some(vote_results), 2)
             })
         })
         .collect();
@@ -156,8 +165,8 @@ async fn process_region_3(
             let request_client = request_client.clone();
             tokio::spawn(async move {
                 let region = populate_region_3(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_3(request_client.clone(), vote_results).await;
-                join_vote(region, vote)
+                let vote = vote_count_region_3(request_client.clone(), vote_results.clone()).await;
+                join_vote(region, vote, Some(vote_results), 3)
             })
         })
         .collect();
@@ -181,8 +190,8 @@ async fn process_region_4(
             let request_client = request_client.clone();
             tokio::spawn(async move {
                 let region = populate_region_4(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_4(request_client.clone(), vote_results).await;
-                join_vote(region, vote)
+                let vote = vote_count_region_4(request_client.clone(), vote_results.clone()).await;
+                join_vote(region, vote, Some(vote_results), 4)
             })
         })
         .collect();
@@ -207,8 +216,8 @@ async fn process_region_5(
             let request_client = request_client.clone();
             tokio::spawn(async move {
                 let region = populate_region_5(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_5(request_client.clone(), vote_results).await;
-                join_vote(region, vote)
+                let vote = vote_count_region_5(request_client.clone(), vote_results.clone()).await;
+                join_vote(region, vote, Some(vote_results), 5)
             })
         })
         .collect();
@@ -411,29 +420,80 @@ async fn vote_count_region_5(
     vote
 }
 
-fn join_vote(region: Vec<Region>, vote: Vote) -> Vec<VoteResult> {
+fn join_vote(
+    region: Vec<Region>,
+    vote: Vote,
+    vote_result: Option<VoteResult>,
+    tingkat: i8,
+) -> Vec<VoteResult> {
     region
         .into_iter()
         .map(|region| {
             let vote = vote.table.get(&region.kode);
+            let name_tingkat_1 = if tingkat == 1 {
+                Some(region.nama.clone())
+            } else {
+                match vote_result.clone() {
+                    Some(value) => value.name_tingkat_1,
+                    None => None,
+                }
+            };
+            let name_tingkat_2 = if tingkat == 2 {
+                Some(region.nama.clone())
+            } else {
+                match vote_result.clone() {
+                    Some(value) => value.name_tingkat_2,
+                    None => None,
+                }
+            };
+            let name_tingkat_3 = if tingkat == 3 {
+                Some(region.nama.clone())
+            } else {
+                match vote_result.clone() {
+                    Some(value) => value.name_tingkat_3,
+                    None => None,
+                }
+            };
+            let name_tingkat_4 = if tingkat == 4 {
+                Some(region.nama.clone())
+            } else {
+                match vote_result.clone() {
+                    Some(value) => value.name_tingkat_4,
+                    None => None,
+                }
+            };
+            let name_tingkat_5 = if tingkat == 5 {
+                Some(region.nama.clone())
+            } else {
+                match vote_result.clone() {
+                    Some(value) => value.name_tingkat_5,
+                    None => None,
+                }
+            };
             match vote {
                 Some(vote) => VoteResult {
-                    nama: region.nama,
-                    id: region.id,
                     kode: region.kode,
                     tingkat: region.tingkat,
                     i01: vote.i01.unwrap_or_else(|| 0),
                     i02: vote.i02.unwrap_or_else(|| 0),
                     i03: vote.i03.unwrap_or_else(|| 0),
+                    name_tingkat_1,
+                    name_tingkat_2,
+                    name_tingkat_3,
+                    name_tingkat_4,
+                    name_tingkat_5,
                 },
                 None => VoteResult {
-                    nama: region.nama,
-                    id: region.id,
                     kode: region.kode,
                     tingkat: region.tingkat,
                     i01: 0,
                     i02: 0,
                     i03: 0,
+                    name_tingkat_1,
+                    name_tingkat_2,
+                    name_tingkat_3,
+                    name_tingkat_4,
+                    name_tingkat_5,
                 },
             }
         })
