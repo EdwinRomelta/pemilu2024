@@ -1,5 +1,5 @@
+use std::{env, fmt};
 use std::collections::HashMap;
-use std::env;
 
 use mongodb::Client;
 use mongodb::options::{ClientOptions, ResolverConfig};
@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 const MAX_PROCESS_SIZE: usize = 100;
 const MAX_BATCH_SIZE: usize = 1000;
+
+#[derive(Clone, Copy, Debug)]
+enum Level {
+    L1,
+    L2,
+    L3,
+    L4,
+    L5,
+}
+
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,157 +98,158 @@ async fn populate_vote() -> Result<(), Error> {
         ))
         .build();
 
-    let vote_results1 = process_region_1(client.clone(), request_client.clone()).await;
+    let vote_results1 =
+        process_region(Level::L1, None, client.clone(), request_client.clone()).await;
 
-    let vote_results2 =
-        process_region_2(vote_results1, client.clone(), request_client.clone()).await;
+    let vote_results2 = process_region(
+        Level::L2,
+        Some(vote_results1),
+        client.clone(),
+        request_client.clone(),
+    )
+        .await;
 
-    let mut vote_results3: Vec<VoteResult> = Vec::new();
-    for element in vote_results2
-        .chunks(MAX_PROCESS_SIZE)
-        .map(|(batch)| batch.to_vec())
-        .collect::<Vec<Vec<VoteResult>>>()
-    {
-        let mut result = process_region_3(element, client.clone(), request_client.clone()).await;
-        vote_results3.append(&mut result);
-    }
+    let vote_results3 = batch_process_region(
+        Level::L3,
+        vote_results2,
+        client.clone(),
+        request_client.clone(),
+    )
+        .await;
 
-    let mut vote_results4: Vec<VoteResult> = Vec::new();
-    for element in vote_results3
-        .chunks(MAX_PROCESS_SIZE)
-        .map(|(batch)| batch.to_vec())
-        .collect::<Vec<Vec<VoteResult>>>()
-    {
-        let mut result = process_region_4(element, client.clone(), request_client.clone()).await;
-        vote_results4.append(&mut result);
-    }
+    let vote_results4 = batch_process_region(
+        Level::L4,
+        vote_results3,
+        client.clone(),
+        request_client.clone(),
+    )
+        .await;
 
-    for element in vote_results4
-        .chunks(MAX_PROCESS_SIZE)
-        .map(|(batch)| batch.to_vec())
-        .collect::<Vec<Vec<VoteResult>>>()
-    {
-        process_region_5(element, client.clone(), request_client.clone()).await;
-    }
+    batch_process_region(
+        Level::L5,
+        vote_results4,
+        client.clone(),
+        request_client.clone(),
+    )
+        .await;
 
     Ok(())
 }
 
-async fn process_region_1(client: Client, request_client: ClientWithMiddleware) -> Vec<VoteResult> {
-    let region1 = populate_region_1(request_client.clone()).await;
-    let vote1 = vote_count_region_1(request_client.clone()).await;
-    let vote_results1 = join_vote(region1.clone(), vote1, None, 1);
-    insert_vote("Tingkat 1", vote_results1.clone(), client).await;
-
-    vote_results1
-}
-
-async fn process_region_2(
-    vote_results1: Vec<VoteResult>,
+async fn process_region(
+    level: Level,
+    vote_results_option: Option<Vec<VoteResult>>,
     client: Client,
     request_client: ClientWithMiddleware,
 ) -> Vec<VoteResult> {
-    let region2_tasks: Vec<_> = vote_results1
-        .into_iter()
-        .map(|vote_results| {
-            let request_client = request_client.clone();
-            tokio::spawn(async move {
-                let region = populate_region_2(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_2(request_client.clone(), vote_results.clone()).await;
-                join_vote(region, vote, Some(vote_results), 2)
-            })
-        })
-        .collect();
-    let vote_results2 = futures::future::join_all(region2_tasks)
-        .await
-        .into_iter()
-        .flat_map(|regions| regions.unwrap())
-        .collect::<Vec<VoteResult>>();
-    insert_vote("Tingkat 2", vote_results2.clone(), client).await;
-
-    vote_results2
+    let result = match level {
+        Level::L1 => {
+            let region1 = populate_region(Level::L1, request_client.clone(), None).await;
+            let vote1 = vote_count_region(Level::L1, request_client.clone(), None).await;
+            return join_vote(region1.clone(), vote1, None, 1);
+        }
+        _ => {
+            let vote_results = vote_results_option.unwrap();
+            let region2_tasks: Vec<_> = vote_results
+                .into_iter()
+                .map(|vote_results| {
+                    let request_client = request_client.clone();
+                    tokio::spawn(async move {
+                        let region = populate_region(
+                            level,
+                            request_client.clone(),
+                            Some(vote_results.clone()),
+                        )
+                            .await;
+                        let vote = vote_count_region(
+                            level,
+                            request_client.clone(),
+                            Some(vote_results.clone()),
+                        )
+                            .await;
+                        join_vote(region, vote, Some(vote_results), 2)
+                    })
+                })
+                .collect();
+            futures::future::join_all(region2_tasks)
+                .await
+                .into_iter()
+                .flat_map(|regions| regions.unwrap())
+                .collect::<Vec<VoteResult>>()
+        }
+    };
+    insert_vote(
+        format!("Level {}", level.to_string()),
+        result.clone(),
+        client,
+    )
+        .await;
+    result
 }
 
-async fn process_region_3(
-    vote_results2: Vec<VoteResult>,
+async fn batch_process_region(
+    level: Level,
+    vote_results: Vec<VoteResult>,
     client: Client,
     request_client: ClientWithMiddleware,
 ) -> Vec<VoteResult> {
-    let region3_tasks: Vec<_> = vote_results2
-        .into_iter()
-        .map(|vote_results| {
-            let request_client = request_client.clone();
-            tokio::spawn(async move {
-                let region = populate_region_3(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_3(request_client.clone(), vote_results.clone()).await;
-                join_vote(region, vote, Some(vote_results), 3)
-            })
-        })
-        .collect();
-    let vote_results3 = futures::future::join_all(region3_tasks)
-        .await
-        .into_iter()
-        .flat_map(|regions| regions.unwrap())
-        .collect::<Vec<VoteResult>>();
-    insert_vote("Tingkat 3", vote_results3.clone(), client).await;
-    vote_results3
+    let mut process_result: Vec<VoteResult> = Vec::new();
+    for element in vote_results
+        .chunks(MAX_PROCESS_SIZE)
+        .map(|batch| batch.to_vec())
+        .collect::<Vec<Vec<VoteResult>>>()
+    {
+        let mut result =
+            process_region(level, Some(element), client.clone(), request_client.clone()).await;
+        process_result.append(&mut result);
+    }
+    process_result
 }
 
-async fn process_region_4(
-    vote_results3: Vec<VoteResult>,
-    client: Client,
+async fn populate_region(
+    level: Level,
     request_client: ClientWithMiddleware,
-) -> Vec<VoteResult> {
-    let region4_tasks: Vec<_> = vote_results3
-        .into_iter()
-        .map(|vote_results| {
-            let request_client = request_client.clone();
-            tokio::spawn(async move {
-                let region = populate_region_4(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_4(request_client.clone(), vote_results.clone()).await;
-                join_vote(region, vote, Some(vote_results), 4)
-            })
-        })
-        .collect();
-    let vote_results4 = futures::future::join_all(region4_tasks)
-        .await
-        .into_iter()
-        .flat_map(|regions| regions.unwrap())
-        .collect::<Vec<VoteResult>>();
-    println!("Inserting Tingkat 4 with {} records", vote_results4.len());
-    insert_vote("Tingkat 4", vote_results4.clone(), client).await;
-    vote_results4
-}
-
-async fn process_region_5(
-    vote_results4: Vec<VoteResult>,
-    client: Client,
-    request_client: ClientWithMiddleware,
-) -> Vec<VoteResult> {
-    let region5_tasks: Vec<_> = vote_results4
-        .into_iter()
-        .map(|vote_results| {
-            let request_client = request_client.clone();
-            tokio::spawn(async move {
-                let region = populate_region_5(request_client.clone(), vote_results.clone()).await;
-                let vote = vote_count_region_5(request_client.clone(), vote_results.clone()).await;
-                join_vote(region, vote, Some(vote_results), 5)
-            })
-        })
-        .collect();
-    let vote_results5 = futures::future::join_all(region5_tasks)
-        .await
-        .into_iter()
-        .flat_map(|regions| regions.unwrap())
-        .collect::<Vec<VoteResult>>();
-    insert_vote("Tingkat 5", vote_results5.clone(), client).await;
-    vote_results5
-}
-
-async fn populate_region_1(request_client: ClientWithMiddleware) -> Vec<Region> {
-    let url = "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/0.json";
+    vote_result_option: Option<VoteResult>,
+) -> Vec<Region> {
+    let url = match level {
+        Level::L1 => "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/0.json".to_string(),
+        Level::L2 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}.json",
+                vote_result.kode
+            )
+        }
+        Level::L3 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}.json",
+                &vote_result.kode[0..2],
+                vote_result.kode
+            )
+        }
+        Level::L4 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}.json",
+                &vote_result.kode[0..2],
+                &vote_result.kode[0..4],
+                vote_result.kode
+            )
+        }
+        Level::L5 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}/{}.json",
+                &vote_result.kode[0..2],
+                &vote_result.kode[0..4],
+                &vote_result.kode[0..6],
+                vote_result.kode
+            )
+        }
+    };
     let response = request_client
-        .get(url)
+        .get(url.clone())
         .header("Content-Type", "application/json")
         .send()
         .await
@@ -243,172 +259,48 @@ async fn populate_region_1(request_client: ClientWithMiddleware) -> Vec<Region> 
     regions
 }
 
-async fn populate_region_2(
+async fn vote_count_region(
+    level: Level,
     request_client: ClientWithMiddleware,
-    vote_result1: VoteResult,
-) -> Vec<Region> {
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}.json",
-        vote_result1.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let regions2 = response.json().await.unwrap();
-    regions2
-}
-
-async fn populate_region_3(
-    request_client: ClientWithMiddleware,
-    vote_result2: VoteResult,
-) -> Vec<Region> {
-    let region2_code = &vote_result2.kode[0..2];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}.json",
-        region2_code, vote_result2.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let regions2 = response.json().await.unwrap();
-    regions2
-}
-
-async fn populate_region_4(
-    request_client: ClientWithMiddleware,
-    vote_result3: VoteResult,
-) -> Vec<Region> {
-    let region2_code = &vote_result3.kode[0..2];
-    let region3_code = &vote_result3.kode[0..4];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}.json",
-        region2_code, region3_code, vote_result3.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let regions3 = response.json().await.unwrap();
-    regions3
-}
-
-async fn populate_region_5(
-    request_client: ClientWithMiddleware,
-    vote_result4: VoteResult,
-) -> Vec<Region> {
-    let region2_code = &vote_result4.kode[0..2];
-    let region3_code = &vote_result4.kode[0..4];
-    let region4_code = &vote_result4.kode[0..6];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/wilayah/pemilu/ppwp/{}/{}/{}/{}.json",
-        region2_code, region3_code, region4_code, vote_result4.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let regions5 = response.json().await.unwrap();
-    regions5
-}
-
-async fn vote_count_region_1(request_client: ClientWithMiddleware) -> Vote {
-    let url = "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp.json";
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let vote: Vote = response.json().await.unwrap();
-    vote
-}
-
-async fn vote_count_region_2(
-    request_client: ClientWithMiddleware,
-    vote_result1: VoteResult,
+    vote_result_option: Option<VoteResult>,
 ) -> Vote {
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}.json",
-        vote_result1.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let vote: Vote = response.json().await.unwrap();
-    vote
-}
-
-async fn vote_count_region_3(
-    request_client: ClientWithMiddleware,
-    vote_result2: VoteResult,
-) -> Vote {
-    let region2_code = &vote_result2.kode[0..2];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}.json",
-        region2_code, vote_result2.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let vote: Vote = response.json().await.unwrap();
-    vote
-}
-
-async fn vote_count_region_4(
-    request_client: ClientWithMiddleware,
-    vote_result2: VoteResult,
-) -> Vote {
-    let region2_code = &vote_result2.kode[0..2];
-    let region3_code = &vote_result2.kode[0..4];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}.json",
-        region2_code, region3_code, vote_result2.kode
-    );
-    let response = request_client
-        .get(url.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .unwrap();
-    println!("Status Code {} : {}", url, response.status());
-    let vote: Vote = response.json().await.unwrap();
-    vote
-}
-
-async fn vote_count_region_5(
-    request_client: ClientWithMiddleware,
-    vote_result4: VoteResult,
-) -> Vote {
-    let region2_code = &vote_result4.kode[0..2];
-    let region3_code = &vote_result4.kode[0..4];
-    let region4_code = &vote_result4.kode[0..6];
-    let url = format!(
-        "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}/{}.json",
-        region2_code, region3_code, region4_code, vote_result4.kode
-    );
+    let url = match level {
+        Level::L1 => "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp.json".to_string(),
+        Level::L2 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}.json",
+                vote_result.kode
+            )
+        }
+        Level::L3 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}.json",
+                &vote_result.kode[0..2],
+                vote_result.kode
+            )
+        }
+        Level::L4 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}.json",
+                &vote_result.kode[0..2],
+                &vote_result.kode[0..4],
+                vote_result.kode
+            )
+        }
+        Level::L5 => {
+            let vote_result = vote_result_option.unwrap();
+            format!(
+                "https://sirekap-obj-data.kpu.go.id/pemilu/hhcw/ppwp/{}/{}/{}/{}.json",
+                &vote_result.kode[0..2],
+                &vote_result.kode[0..4],
+                &vote_result.kode[0..6],
+                vote_result.kode
+            )
+        }
+    };
     let response = request_client
         .get(url.clone())
         .header("Content-Type", "application/json")
@@ -500,7 +392,7 @@ fn join_vote(
         .collect::<Vec<VoteResult>>()
 }
 
-async fn insert_vote(title: &str, vote_results: Vec<VoteResult>, client: Client) {
+async fn insert_vote(title: String, vote_results: Vec<VoteResult>, client: Client) {
     let length = (vote_results.len() / MAX_BATCH_SIZE) + 1;
     let insert_task_1: Vec<_> = vote_results
         .clone()
